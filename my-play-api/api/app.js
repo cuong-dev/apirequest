@@ -1,6 +1,6 @@
-const gplay = require('google-play-scraper');
+import gplay from 'google-play-scraper';
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   // Bật CORS để Apps Script gọi được
   res.setHeader('Access-Control-Allow-Origin', '*');
   
@@ -17,4 +17,4 @@ module.exports = async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-};
+}
