@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   try {
     const app = await gplay.app({ 
       appId: id, 
-      lang: 'vi', 
+      lang: 'en', 
       country: 'us' 
     });
     res.status(200).json(app);
