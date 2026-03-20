@@ -21,9 +21,11 @@ export default async function handler(req, res) {
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Pragma': 'no-cache',
       'Expires': '0',
-      // Giả lập trình duyệt Chrome xịn đang ấn F5 (Tránh bị Google coi là Bot và quăng cho data rác/cache)
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      // Giả lập Samsung Galaxy S24 Ultra (SM-S928B) chạy Android 14, Chrome mới nhất
+      'User-Agent': 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
       'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Sec-Ch-Ua-Platform': '"Android"',
+      'Sec-Ch-Ua-Mobile': '?1'
     }
   };
 
