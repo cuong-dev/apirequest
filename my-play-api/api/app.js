@@ -1,6 +1,5 @@
 import gplay from 'google-play-scraper';
 
-// 1. Hàm so sánh version (Logic cốt lõi)
 function isVersionNewer(oldVer, newVer) {
   if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
   const cleanOld = String(oldVer).replace(/[^0-9.]/g, '');
@@ -15,34 +14,28 @@ function isVersionNewer(oldVer, newVer) {
   return false;
 }
 
-// 2. Hàm săn version từ UpToDown (Né Cloudflare bằng Browser Header)
-async function getVersionFromUpToDown(appId) {
+// HÀM CHỐT HẠ: Dùng ScraperAnt để lấy HTML sạch từ APKCombo
+async function getVersionFromAPKCombo(appId) {
+  const ANT_API_KEY = d6efaa10e6114cac96bc12a2e9b21e99; 
+  const targetUrl = encodeURIComponent(`https://apkcombo.com/vi/a/${appId}/`);
+  
+  // Gọi qua Proxy của ScraperAnt để né Cloudflare
+  const proxyUrl = `https://api.scraperant.com/v2/general?url=${targetUrl}&x-api-key=${ANT_API_KEY}&browser=false`;
+
   try {
-    const searchUrl = `https://www.uptodown.com/android/search/${appId}`;
-    const res = await fetch(searchUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' }
-    });
+    const res = await fetch(proxyUrl);
     if (!res.ok) return null;
-    const html = await res.text();
-
-    // Quét số version trong HTML của UpToDown
-    // Thường nằm trong các thẻ class "version" hoặc "last"
-    const match = html.match(/class="version">([^<]+)</i)
-               || html.match(/<div class="last">([^<]+)</i)
-               || html.match(/([0-9]+\.[0-9]+(?:\.[0-9]+)+)/);
-
-    return match ? match[1].trim() : null;
-  } catch (e) { return null; }
-}
-
-// 3. Hàm gọi Aptoide API (Phương án 2)
-async function getVersionFromAptoide(appId) {
-  try {
-    const res = await fetch(`https://ws75.aptoide.com/api/7/app/getMeta?package_name=${appId}`);
     const data = await res.json();
-    if (data.nodes?.meta?.data?.file) return data.nodes.meta.data.file.vername;
+    const html = data.content; // ScraperAnt trả về HTML đã vượt qua Cloudflare
+
+    const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
+               || html.match(/data-version="([^"]+)"/i)
+               || html.match(/Version\s*([\d\.]+)/i);
+
+    return match ? match[1].trim().replace(/^v/i, '').trim() : null;
+  } catch (e) {
     return null;
-  } catch (e) { return null; }
+  }
 }
 
 export default async function handler(req, res) {
@@ -52,30 +45,22 @@ export default async function handler(req, res) {
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
   try {
-    // Kích hoạt 3 nòng súng cùng lúc
-    const [playApp, upVer, aptVer] = await Promise.all([
-      gplay.app({ appId: id, lang: 'vi', country: 'us' }).catch(() => null),
-      getVersionFromUpToDown(id),
-      getVersionFromAptoide(id)
-    ]);
-
+    const playApp = await gplay.app({ appId: id, lang: 'vi', country: 'us' }).catch(() => null);
     if (!playApp) return res.status(404).json({ error: 'App không tồn tại' });
+
+    // Gọi "Sát thủ" vượt rào Cloudflare
+    const apkComboVer = await getVersionFromAPKCombo(id);
 
     let bestVer = playApp.version;
     let source = "Google Play Gốc";
 
-    // So sánh: UpToDown vs Aptoide vs Google Play
-    if (upVer && isVersionNewer(bestVer, upVer)) {
-      bestVer = upVer;
-      source = "UpToDown";
-    }
-    if (aptVer && isVersionNewer(bestVer, aptVer)) {
-      bestVer = aptVer;
-      source = "Aptoide API";
+    if (apkComboVer && isVersionNewer(bestVer, apkComboVer)) {
+      bestVer = apkComboVer;
+      source = "APKCombo (Vượt rào thành công)";
     }
 
     playApp.version = bestVer;
-    playApp.recentChanges = (playApp.recentChanges || "") + `\n\n[🚀 Nguồn: ${source}]`;
+    playApp.recentChanges = (playApp.recentChanges || "") + `\n\n[🛡️ Check Version: ${source}]`;
 
     res.status(200).json(playApp);
   } catch (error) {
