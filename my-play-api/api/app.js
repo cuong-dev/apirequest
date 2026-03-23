@@ -1,6 +1,6 @@
 import gplay from 'google-play-scraper';
 
-// 1. Hàm so sánh version chuẩn
+// 1. Hàm so sánh version chuẩn xác
 function isVersionNewer(oldVer, newVer) {
   if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
   const cleanOld = String(oldVer).replace(/[^0-9.]/g, '');
@@ -9,75 +9,75 @@ function isVersionNewer(oldVer, newVer) {
   const newParts = cleanNew.split(".").map(n => parseInt(n, 10) || 0);
   const len = Math.max(oldParts.length, newParts.length);
   for (let i = 0; i < len; i++) {
-    if ((newParts[i] || 0) > (oldParts[i] || 0)) return true;
-    if ((newParts[i] || 0) < (oldParts[i] || 0)) return false;
+    const o = oldParts[i] || 0;
+    const n = newParts[i] || 0;
+    if (n > o) return true;
+    if (n < o) return false;
   }
   return false;
 }
 
-// 2. Hàm săn version từ APKCombo dùng ScrapingAnt (Cấu hình tối cao)
-async function getVersionFromScraperAnt(appId) {
-  const ANT_API_KEY = 'd6efaa10e6114cac96bc12a2e9b21e99'; 
-  const targetUrl = `https://apkcombo.com/vi/a/${appId}/`;
-  
-  // THÊM: wait_for_selector để đợi trang render xong số version
-  const proxyUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(targetUrl)}&x-api-key=${ANT_API_KEY}&browser=true&wait_for_selector=.is-version`;
-
+// 2. Hàm "Đào sâu" mã nguồn Google Play bằng Mobile User-Agent
+async function getVersionFromGoogleDeepScan(appId) {
+  const url = `https://play.google.com/store/apps/details?id=${appId}&hl=vi&gl=vn`;
   try {
-    const res = await fetch(proxyUrl);
-    if (!res.ok) return { ver: null, log: `Lỗi HTTP ${res.status}` };
+    const response = await fetch(url, {
+      headers: {
+        // Giả lập Samsung Galaxy S23 để Google nhả version mới nhất
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+        'Accept-Language': 'vi-VN,vi;q=0.9'
+      }
+    });
+    const html = await response.text();
 
-    const jsonData = await res.json();
-    const html = jsonData.content; 
-    if (!html) return { ver: null, log: "ScrapingAnt trả về content rỗng" };
-
-    // Kiểm tra xem có dính trang "Verify you are human" không
-    if (html.includes("Cloudflare") && html.includes("verify")) {
-      return { ver: null, log: "Vẫn bị Cloudflare chặn (Captcha)" };
-    }
-
-    // Quét version bằng nhiều mẫu Regex khác nhau (Phòng hờ APKCombo đổi giao diện)
-    const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
-               || html.match(/class="version">([^<]+)</i)
-               || html.match(/data-version="([^"]+)"/i)
-               || html.match(/Version\s*([\d\.]+)/i);
+    // Tìm trong mảng dữ liệu thô AF_initDataCallback của Google
+    // Đây là nơi chứa metadata thực tế của app bao gồm cả bản đang rollout
+    const match = html.match(/\[\[\["([\d\.]+)"\]\]\]/) 
+               || html.match(/\["([\d\.]+",\[\[\[/)
+               || html.match(/\[null,"([\d\.]+)"\]/); 
 
     if (match && match[1]) {
-      return { ver: match[1].trim().replace(/^v/i, '').trim(), log: "Thành công" };
+      return match[1].trim();
     }
-    
-    return { ver: null, log: "Không tìm thấy số version trong HTML" };
+    return null;
   } catch (e) {
-    return { ver: null, log: e.message };
+    return null;
   }
 }
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+
   const { id } = req.query;
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
   try {
-    // Chạy song song cả 2 luồng
-    const [playApp, antResult] = await Promise.all([
-      gplay.app({ appId: id, lang: 'vi', country: 'us' }).catch(() => null),
-      getVersionFromScraperAnt(id)
-    ]);
+    // Luồng 1: Lấy dữ liệu đầy đủ (Ảnh, Tên, Mô tả) từ thư viện
+    const playApp = await gplay.app({
+      appId: id,
+      lang: 'vi',
+      country: 'vn',
+      requestOptions: { headers: { 'Cache-Control': 'no-cache' } }
+    }).catch(() => null);
 
-    if (!playApp) return res.status(404).json({ error: 'App không tồn tại' });
-
-    let finalSource = "Google Play Gốc";
-    
-    // Nếu ScrapingAnt lấy được version và bản đó mới hơn Google Play
-    if (antResult.ver && isVersionNewer(playApp.version, antResult.ver)) {
-      playApp.version = antResult.ver;
-      finalSource = `APKCombo (via ANT)`;
+    if (!playApp) {
+      return res.status(404).json({ error: 'Không tìm thấy App' });
     }
 
-    // Gắn Log để bạn kiểm tra lỗi ngay trên Discord
-    playApp.recentChanges = (playApp.recentChanges || "") + `\n\n[🛡️ Log: ${antResult.log}]\n[🔍 Nguồn: ${finalSource}]`;
+    // Luồng 2: Quét sâu mã nguồn thô để tìm Version rollout mới nhất
+    const deepVersion = await getVersionFromGoogleDeepScan(id);
+
+    let finalSource = "Google Play (Cơ bản)";
+    
+    // Nếu bản quét sâu tìm được số to hơn bản thư viện lấy được
+    if (deepVersion && isVersionNewer(playApp.version, deepVersion)) {
+      playApp.version = deepVersion;
+      finalSource = "Google Play (Quét sâu hệ thống)";
+    }
+
+    // Ghi chú nguồn để bạn theo dõi trên Discord
+    playApp.recentChanges = (playApp.recentChanges || "") + `\n\n[🛡️ Nguồn: ${finalSource}]`;
 
     res.status(200).json(playApp);
   } catch (error) {
