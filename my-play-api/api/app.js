@@ -1,9 +1,8 @@
 import gplay from 'google-play-scraper';
 
-// 1. Hàm so sánh version cực mạnh (Lọc bỏ các chữ cái linh tinh như 'v' hay 'Version')
+// 1. Hàm so sánh version
 function isVersionNewer(oldVer, newVer) {
   if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
-  // Làm sạch chuỗi, chỉ giữ lại số và dấu chấm (VD: "v1.0.4" -> "1.0.4")
   const cleanOld = String(oldVer).replace(/[^0-9.]/g, '');
   const cleanNew = String(newVer).replace(/[^0-9.]/g, '');
   
@@ -20,31 +19,42 @@ function isVersionNewer(oldVer, newVer) {
   return false;
 }
 
-// 2. Hàm cào dữ liệu bí mật từ APKCombo
+// 2. Hàm cào APKCombo với Header giả lập Chrome xịn nhất để né Cloudflare
 async function getApkComboVersion(appId) {
   try {
-    // Mẹo: Cấu trúc link APKCombo mặc định luôn tự chuyển hướng đúng app ID
     const url = `https://apkcombo.com/vi/a/${appId}/`;
-    
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Sec-Ch-Ua': '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1'
       }
     });
     
     if (!res.ok) return null;
     const html = await res.text();
 
-    // Dùng Regex quét HTML của APKCombo để tìm ra version
-    // APKCombo thường lưu version ở nhiều định dạng, ta quét bằng nhiều lớp lưới:
+    // Nếu vẫn xui xẻo bị Cloudflare chặn thì bỏ qua
+    if (html.includes('Cloudflare') || html.includes('Just a moment')) {
+      return null;
+    }
+
     const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
                || html.match(/data-version="([^"]+)"/i)
                || html.match(/Version\s*([\d\.]+)/i);
 
     if (match && match[1]) {
-      let ver = match[1].trim();
-      ver = ver.replace(/^v/i, '').trim(); // Cắt bỏ chữ 'v' ở đầu nếu có
-      return ver;
+      return match[1].trim().replace(/^v/i, '').trim();
     }
     return null;
   } catch (e) {
@@ -54,19 +64,16 @@ async function getApkComboVersion(appId) {
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   
   const { id } = req.query;
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
   try {
-    // 3. Chạy SONG SONG cả 2 trình cào dữ liệu cùng 1 lúc cho nhanh
+    // 3. Chạy SONG SONG: Vừa cào Google Play, vừa rình APKCombo
     const [playApp, apkComboVersion] = await Promise.all([
-      // Bot 1: Cào Google Play (Để lấy tên, icon, screenshot, info...)
       gplay.app({
-        appId: id,
-        lang: 'vi',
-        country: 'us',
+        appId: id, lang: 'vi', country: 'us',
         requestOptions: {
           headers: {
             'Cache-Control': 'no-cache',
@@ -74,24 +81,21 @@ export default async function handler(req, res) {
           }
         }
       }).catch(() => null),
-      
-      // Bot 2: Cào APKCombo (Chỉ để rình lấy cái Version mới nhất)
       getApkComboVersion(id)
     ]);
 
     if (!playApp) {
-      return res.status(500).json({ error: 'App ID không tồn tại hoặc Google Play chặn.' });
+      return res.status(500).json({ error: 'App ID không tồn tại hoặc lỗi Google Play' });
     }
 
-    // 4. So sánh và Cướp ngôi nếu APKCombo có bản mới hơn
-    playApp.sourceLog = 'Bản từ Google Play gốc'; // Ghi chú để dễ theo dõi
-
+    // 4. Cướp version của APKCombo nếu nó cao hơn bản 1% của Google Play
     if (apkComboVersion && isVersionNewer(playApp.version, apkComboVersion)) {
-      playApp.version = apkComboVersion; // Thay lõi version bằng bản của APKCombo
-      playApp.sourceLog = `Đã dùng bản săn từ APKCombo (${apkComboVersion})`;
+      playApp.version = apkComboVersion;
+      playApp.sourceLog = `APKCombo (${apkComboVersion})`;
+    } else {
+      playApp.sourceLog = `Google Play`;
     }
 
-    // 5. Trả về kết quả hoàn hảo cho Google Sheet
     res.status(200).json(playApp);
 
   } catch (error) {
