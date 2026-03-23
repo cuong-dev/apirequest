@@ -8,12 +8,50 @@ function isVersionNewer(oldVer, newVer) {
   const newParts = cleanNew.split(".").map(n => parseInt(n, 10) || 0);
   const len = Math.max(oldParts.length, newParts.length);
   for (let i = 0; i < len; i++) {
-    const o = oldParts[i] || 0;
-    const n = newParts[i] || 0;
-    if (n > o) return true;
-    if (n < o) return false;
+    if ((newParts[i] || 0) > (oldParts[i] || 0)) return true;
+    if ((newParts[i] || 0) < (oldParts[i] || 0)) return false;
   }
   return false;
+}
+
+// TUYỆT CHIÊU GIẢ DANH GOOGLEBOT (Để CF mở cửa mời vào)
+const GOOGLEBOT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+  'X-Forwarded-For': '66.249.66.1', // Ép IP giả của máy chủ Google Search
+  'Accept': '*/*'
+};
+
+// 1. Bot săn từ APKCombo
+async function getApkComboVersion(appId) {
+  try {
+    const res = await fetch(`https://apkcombo.com/vi/a/${appId}/`, { headers: GOOGLEBOT_HEADERS });
+    if (!res.ok) return null;
+    const html = await res.text();
+    if (html.includes('Cloudflare') || html.includes('Just a moment')) return null;
+
+    const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
+               || html.match(/data-version="([^"]+)"/i)
+               || html.match(/Version\s*([\d\.]+)/i);
+    if (match && match[1]) return match[1].trim().replace(/^v/i, '').trim();
+    return null;
+  } catch (e) { return null; }
+}
+
+// 2. Bot săn từ AppBrain (Trang này ít bị chặn hơn)
+async function getAppBrainVersion(appId) {
+  try {
+    const res = await fetch(`https://www.appbrain.com/app/${appId}`, { headers: GOOGLEBOT_HEADERS });
+    if (!res.ok) return null;
+    const html = await res.text();
+    
+    // Tìm cấu trúc chứa version của AppBrain
+    const match = html.match(/Changelog cho bản cập nhật ([^<]+)/i)
+               || html.match(/Version:<\/b>\s*([^<]+)/i)
+               || html.match(/Phiên bản hiện tại:<\/b>\s*([^<]+)/i);
+               
+    if (match && match[1]) return match[1].trim().replace(/^v/i, '').trim();
+    return null;
+  } catch (e) { return null; }
 }
 
 export default async function handler(req, res) {
@@ -23,90 +61,43 @@ export default async function handler(req, res) {
   const { id } = req.query;
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
-  // BẢNG NHẬT KÝ THEO DÕI (Sẽ xuất ra màn hình cho bạn xem)
-  let debugLog = {
-    app_id: id,
-    gplay_scraper: { status: "Đang chờ", version: null, error: null },
-    serpapi: { status: "Đang chờ", raw_version: null, clean_version: null, http_code: null, error: null },
-    ket_luan_cuoi_cung: ""
-  };
-
-  // 1. Bắt đầu gọi SerpAPI
-  const API_KEY = "ef59b4172e53b97473f2cd46a728a5ea930b9fa6b2ccd96f0c1dab1b5b445166";
-  const serpUrl = `https://serpapi.com/search.json?engine=google_play_product&store=apps&gl=us&hl=vi&product_id=${id}&api_key=${API_KEY}`;
-  
-  let serpVersionFinal = null;
   try {
-    const serpRes = await fetch(serpUrl);
-    debugLog.serpapi.http_code = serpRes.status;
+    // Chạy 3 xe cào cùng lúc: Google Play (lấy ảnh/info) + 2 trang APK (Săn Version)
+    const [playApp, apkComboVer, appBrainVer] = await Promise.all([
+      gplay.app({
+        appId: id, lang: 'vi', country: 'us',
+        requestOptions: { headers: { 'Cache-Control': 'no-cache' } }
+      }).catch(() => null),
+      getApkComboVersion(id),
+      getAppBrainVersion(id)
+    ]);
+
+    if (!playApp) {
+      return res.status(500).json({ error: 'App ID không tồn tại hoặc lỗi API nền' });
+    }
+
+    // Gộp 2 kết quả săn được lại, lấy số to nhất làm chuẩn
+    let bestExternalVer = null;
+    let externalSource = "";
+
+    if (apkComboVer) { bestExternalVer = apkComboVer; externalSource = `APKCombo`; }
     
-    if (!serpRes.ok) {
-      debugLog.serpapi.status = "Lỗi HTTP";
-      debugLog.serpapi.error = `Server trả về mã ${serpRes.status} - ${serpRes.statusText}`;
-    } else {
-      const data = await serpRes.json();
-      if (data.error) {
-        debugLog.serpapi.status = "SerpAPI từ chối";
-        debugLog.serpapi.error = data.error; // Thường do hết quota (tiền)
-      } else if (data.product_info && data.product_info.version) {
-        debugLog.serpapi.status = "Thành công";
-        debugLog.serpapi.raw_version = data.product_info.version;
-        
-        let ver = data.product_info.version;
-        if (ver.toLowerCase().includes("varies") || ver.toLowerCase().includes("thay đổi")) {
-          debugLog.serpapi.error = "Google Play giấu version thành chữ 'Varies with device'";
-        } else {
-          serpVersionFinal = ver.replace(/^v/i, '').trim();
-          debugLog.serpapi.clean_version = serpVersionFinal;
-        }
-      } else {
-        debugLog.serpapi.status = "Thất bại";
-        debugLog.serpapi.error = "Không tìm thấy product_info.version trong cục data SerpAPI trả về";
-      }
+    if (appBrainVer && isVersionNewer(bestExternalVer, appBrainVer)) {
+      bestExternalVer = appBrainVer; 
+      externalSource = `AppBrain`;
     }
-  } catch (e) {
-    debugLog.serpapi.status = "Sập Code Vercel";
-    debugLog.serpapi.error = e.message;
-  }
 
-  // 2. Bắt đầu gọi Google Play Scraper (Vercel)
-  let playApp = null;
-  try {
-    playApp = await gplay.app({
-      appId: id, lang: 'vi', country: 'us',
-      requestOptions: { headers: { 'Cache-Control': 'no-cache' } }
-    });
-    debugLog.gplay_scraper.status = "Thành công";
-    debugLog.gplay_scraper.version = playApp.version;
-  } catch (e) {
-    debugLog.gplay_scraper.status = "Lỗi thư viện gplay";
-    debugLog.gplay_scraper.error = e.message;
-  }
-
-  // 3. Xử lý Logic và Chốt sổ
-  if (!playApp) {
-    return res.status(200).json({ 
-      canh_bao: "Thư viện cào Google Play đã sập hoàn toàn, không có data nền để trả về.", 
-      debug_log: debugLog 
-    });
-  }
-
-  if (serpVersionFinal && isVersionNewer(playApp.version, serpVersionFinal)) {
-    playApp.version = serpVersionFinal;
-    playApp.sourceLog = `SerpAPI (${serpVersionFinal})`;
-    debugLog.ket_luan_cuoi_cung = `SerpAPI cao hơn (${serpVersionFinal} > ${debugLog.gplay_scraper.version}). ĐÃ ĐÁNH TRÁO THÀNH CÔNG!`;
-  } else {
-    playApp.sourceLog = `Google Play`;
-    if (!serpVersionFinal) {
-      debugLog.ket_luan_cuoi_cung = "SerpAPI không lấy được version, đành xài của Google Play.";
+    // So tài với bản của Google Play đang có
+    if (bestExternalVer && isVersionNewer(playApp.version, bestExternalVer)) {
+      playApp.version = bestExternalVer;
+      playApp.sourceLog = `${externalSource} (Bản mới: ${bestExternalVer})`;
     } else {
-      debugLog.ket_luan_cuoi_cung = `SerpAPI (${serpVersionFinal}) KHÔNG CAO HƠN Google Play (${debugLog.gplay_scraper.version}). Giữ nguyên bản gốc.`;
+      playApp.sourceLog = `Google Play`;
     }
+
+    res.status(200).json(playApp);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  // Nhét bảng log vào cuối data để đọc
-  playApp.debug_log = debugLog;
-
-  // Trả về HTTP 200 để hiển thị log lên trình duyệt
-  res.status(200).json(playApp);
 }
