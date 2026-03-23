@@ -1,15 +1,13 @@
 import gplay from 'google-play-scraper';
 
-// 1. Hàm so sánh version
+// Hàm so sánh version chuẩn
 function isVersionNewer(oldVer, newVer) {
   if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
   const cleanOld = String(oldVer).replace(/[^0-9.]/g, '');
   const cleanNew = String(newVer).replace(/[^0-9.]/g, '');
-  
   const oldParts = cleanOld.split(".").map(n => parseInt(n, 10) || 0);
   const newParts = cleanNew.split(".").map(n => parseInt(n, 10) || 0);
   const len = Math.max(oldParts.length, newParts.length);
-  
   for (let i = 0; i < len; i++) {
     const o = oldParts[i] || 0;
     const n = newParts[i] || 0;
@@ -19,34 +17,22 @@ function isVersionNewer(oldVer, newVer) {
   return false;
 }
 
-// 2. Hàm cào APKCombo ĐÃ NÂNG CẤP (Dùng AllOrigins Proxy để xuyên thủng Cloudflare)
-async function getApkComboVersion(appId) {
+// Hàm dùng SerpAPI để xuyên thủng hệ thống lấy version (Không sợ Cloudflare)
+async function getRealVersionViaSerpApi(appId) {
+  // Gắn API Key của bạn vào đây
+  const API_KEY = "ad0607aaaeaad68f78555e246f65fa06a59078d1f52988021a4568c718c329fc";
+  const url = `https://serpapi.com/search.json?engine=google_play_product&store=apps&gl=us&hl=vi&product_id=${appId}&api_key=${API_KEY}`;
+  
   try {
-    // Link gốc cần cào
-    const targetUrl = `https://apkcombo.com/vi/a/${appId}/`;
-    
-    // Bọc link gốc qua màng lọc AllOrigins (Giấu IP Vercel)
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-    
-    const res = await fetch(proxyUrl);
+    const res = await fetch(url);
     if (!res.ok) return null;
-    
-    // AllOrigins trả về JSON, trong đó chứa toàn bộ HTML của APKCombo
     const data = await res.json();
-    const html = data.contents;
-
-    if (!html || html.includes('Cloudflare') || html.includes('Just a moment')) {
-      return null; // Proxy cũng bị chặn thì đành chịu
-    }
-
-    // Nâng cấp lưới quét Regex để bắt mọi định dạng version
-    const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
-               || html.match(/data-version="([^"]+)"/i)
-               || html.match(/Version\s*([\d\.]+)/i)
-               || html.match(/<span class="version[^>]*>([^<]+)<\/span>/i);
-
-    if (match && match[1]) {
-      return match[1].trim().replace(/^v/i, '').trim();
+    
+    if (data && data.product_info && data.product_info.version) {
+      let ver = data.product_info.version;
+      // Bỏ qua nếu version bị Google giấu thành "Varies with device"
+      if (ver.toLowerCase().includes("varies") || ver.toLowerCase().includes("thay đổi")) return null;
+      return ver.replace(/^v/i, '').trim();
     }
     return null;
   } catch (e) {
@@ -62,25 +48,23 @@ export default async function handler(req, res) {
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
   try {
-    // 3. Chạy SONG SONG: Google Play & APKCombo (qua Proxy)
-    const [playApp, apkComboVersion] = await Promise.all([
+    // Chạy SONG SONG: Vừa cào Google Play (lấy ảnh, text), vừa gọi SerpAPI (lấy Version)
+    const [playApp, realVersion] = await Promise.all([
       gplay.app({
         appId: id, lang: 'vi', country: 'us',
-        requestOptions: {
-          headers: { 'Cache-Control': 'no-cache' }
-        }
+        requestOptions: { headers: { 'Cache-Control': 'no-cache' } }
       }).catch(() => null),
-      getApkComboVersion(id)
+      getRealVersionViaSerpApi(id)
     ]);
 
     if (!playApp) {
-      return res.status(500).json({ error: 'App ID không tồn tại hoặc lỗi Google Play' });
+      return res.status(500).json({ error: 'App ID không tồn tại hoặc lỗi API' });
     }
 
-    // 4. Cướp version của APKCombo nếu cao hơn
-    if (apkComboVersion && isVersionNewer(playApp.version, apkComboVersion)) {
-      playApp.version = apkComboVersion;
-      playApp.sourceLog = `APKCombo qua Proxy (${apkComboVersion})`;
+    // Nếu SerpAPI bắt được bản cao hơn, lập tức ghi đè vào data của Vercel
+    if (realVersion && isVersionNewer(playApp.version, realVersion)) {
+      playApp.version = realVersion;
+      playApp.sourceLog = `SerpAPI (Bản chuẩn: ${realVersion})`;
     } else {
       playApp.sourceLog = `Google Play`;
     }
