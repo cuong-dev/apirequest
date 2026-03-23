@@ -16,7 +16,7 @@ function isVersionNewer(oldVer, newVer) {
 
 // HÀM CHỐT HẠ: Dùng ScraperAnt để lấy HTML sạch từ APKCombo
 async function getVersionFromAPKCombo(appId) {
-  const ANT_API_KEY = d6efaa10e6114cac96bc12a2e9b21e99; 
+  const ANT_API_KEY = 'd6efaa10e6114cac96bc12a2e9b21e99'; 
   const targetUrl = encodeURIComponent(`https://apkcombo.com/vi/a/${appId}/`);
   
   // Gọi qua Proxy của ScraperAnt để né Cloudflare
