@@ -19,39 +19,31 @@ function isVersionNewer(oldVer, newVer) {
   return false;
 }
 
-// 2. Hàm cào APKCombo với Header giả lập Chrome xịn nhất để né Cloudflare
+// 2. Hàm cào APKCombo ĐÃ NÂNG CẤP (Dùng AllOrigins Proxy để xuyên thủng Cloudflare)
 async function getApkComboVersion(appId) {
   try {
-    const url = `https://apkcombo.com/vi/a/${appId}/`;
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Sec-Ch-Ua': '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1'
-      }
-    });
+    // Link gốc cần cào
+    const targetUrl = `https://apkcombo.com/vi/a/${appId}/`;
     
+    // Bọc link gốc qua màng lọc AllOrigins (Giấu IP Vercel)
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+    
+    const res = await fetch(proxyUrl);
     if (!res.ok) return null;
-    const html = await res.text();
+    
+    // AllOrigins trả về JSON, trong đó chứa toàn bộ HTML của APKCombo
+    const data = await res.json();
+    const html = data.contents;
 
-    // Nếu vẫn xui xẻo bị Cloudflare chặn thì bỏ qua
-    if (html.includes('Cloudflare') || html.includes('Just a moment')) {
-      return null;
+    if (!html || html.includes('Cloudflare') || html.includes('Just a moment')) {
+      return null; // Proxy cũng bị chặn thì đành chịu
     }
 
+    // Nâng cấp lưới quét Regex để bắt mọi định dạng version
     const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
                || html.match(/data-version="([^"]+)"/i)
-               || html.match(/Version\s*([\d\.]+)/i);
+               || html.match(/Version\s*([\d\.]+)/i)
+               || html.match(/<span class="version[^>]*>([^<]+)<\/span>/i);
 
     if (match && match[1]) {
       return match[1].trim().replace(/^v/i, '').trim();
@@ -70,15 +62,12 @@ export default async function handler(req, res) {
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
   try {
-    // 3. Chạy SONG SONG: Vừa cào Google Play, vừa rình APKCombo
+    // 3. Chạy SONG SONG: Google Play & APKCombo (qua Proxy)
     const [playApp, apkComboVersion] = await Promise.all([
       gplay.app({
         appId: id, lang: 'vi', country: 'us',
         requestOptions: {
-          headers: {
-            'Cache-Control': 'no-cache',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0 Safari/537.36'
-          }
+          headers: { 'Cache-Control': 'no-cache' }
         }
       }).catch(() => null),
       getApkComboVersion(id)
@@ -88,10 +77,10 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'App ID không tồn tại hoặc lỗi Google Play' });
     }
 
-    // 4. Cướp version của APKCombo nếu nó cao hơn bản 1% của Google Play
+    // 4. Cướp version của APKCombo nếu cao hơn
     if (apkComboVersion && isVersionNewer(playApp.version, apkComboVersion)) {
       playApp.version = apkComboVersion;
-      playApp.sourceLog = `APKCombo (${apkComboVersion})`;
+      playApp.sourceLog = `APKCombo qua Proxy (${apkComboVersion})`;
     } else {
       playApp.sourceLog = `Google Play`;
     }
