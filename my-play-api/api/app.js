@@ -2,7 +2,7 @@ import gplay from 'google-play-scraper';
 
 // ---------------- VERSION COMPARE ----------------
 function isVersionNewer(oldVer, newVer) {
-  if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
+  if (!oldVer || !newVer) return false;
 
   const oldParts = String(oldVer).split(".").map(n => parseInt(n, 10) || 0);
   const newParts = String(newVer).split(".").map(n => parseInt(n, 10) || 0);
@@ -17,40 +17,45 @@ function isVersionNewer(oldVer, newVer) {
   return false;
 }
 
-// ---------------- FETCH HTML VERSION ----------------
-async function getVersionFromHTML(appId, gl = 'us', retry = 2) {
+// ---------------- BATCHEXECUTE ----------------
+async function getVersionFromBatchexecute(appId) {
   try {
-    const url = `https://play.google.com/store/apps/details?id=${appId}&hl=vi&gl=${gl}&_=${Date.now()}_${Math.random()}`;
+    const body = `f.req=[[[\"UsvDTd\",\"[[\\\"${appId}\\\",7]]\",null,\"generic\"]]]`;
 
-    const res = await fetch(url, {
+    const res = await fetch("https://play.google.com/_/PlayStoreUi/data/batchexecute", {
+      method: "POST",
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Cache-Control': 'no-cache'
-      }
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "User-Agent": "Mozilla/5.0",
+      },
+      body
     });
 
-    const html = await res.text();
+    const text = await res.text();
 
-    // Cách 1: regex nhanh
-    let match = html.match(/"softwareVersion":"(.*?)"/);
-    if (match && match[1]) return match[1];
+    // Regex lấy version (x.y.z hoặc x.y.z.w)
+    const match = text.match(/\d+\.\d+(\.\d+)+/);
 
-    // Cách 2: fallback parse sâu hơn (AF_initDataCallback)
-    match = html.match(/AF_initDataCallback[\s\S]*?data:([\s\S]*?),\s*sideChannel/);
-    if (match) {
-      const data = match[1];
-      const verMatch = data.match(/\d+(\.\d+)+/);
-      if (verMatch) return verMatch[0];
-    }
-
-    return null;
+    return match ? match[0] : null;
 
   } catch (e) {
-    if (retry > 0) {
-      return await getVersionFromHTML(appId, gl, retry - 1);
-    }
     return null;
   }
+}
+
+// ---------------- RETRY BATCHEXECUTE ----------------
+async function getBatchVersions(appId, retry = 5) {
+  const versions = [];
+
+  for (let i = 0; i < retry; i++) {
+    const v = await getVersionFromBatchexecute(appId);
+    if (v) versions.push(v);
+
+    // delay random tránh bị cache/bucket
+    await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+  }
+
+  return versions;
 }
 
 // ---------------- MAIN HANDLER ----------------
@@ -65,14 +70,14 @@ export default async function handler(req, res) {
     headers: {
       'Cache-Control': 'no-cache',
       'Pragma': 'no-cache',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+      'User-Agent': 'Mozilla/5.0'
     }
   };
 
   try {
     const countries = ['us', 'vn', 'sg'];
 
-    // ----------- GPLAY SONG SONG -----------
+    // ----------- GPLAY -----------
     const gplayPromises = countries.map(country =>
       gplay.app({
         appId: id,
@@ -82,44 +87,49 @@ export default async function handler(req, res) {
       }).catch(() => null)
     );
 
-    // ----------- HTML SONG SONG (multi region) -----------
-    const htmlPromises = countries.map(gl =>
-      getVersionFromHTML(id, gl)
-    );
+    // ----------- BATCHEXECUTE -----------
+    const batchPromise = getBatchVersions(id, 5);
 
-    const [gplayResults, htmlResults] = await Promise.all([
+    const [gplayResults, batchVersions] = await Promise.all([
       Promise.all(gplayPromises),
-      Promise.all(htmlPromises)
+      batchPromise
     ]);
 
-    const validResults = gplayResults.filter(r => r !== null);
-    const validHTMLVersions = htmlResults.filter(v => v !== null);
+    const validGplay = gplayResults.filter(r => r !== null);
+    const allVersions = [];
 
-    if (validResults.length === 0 && validHTMLVersions.length === 0) {
-      return res.status(500).json({ error: 'Không lấy được dữ liệu từ Google Play' });
+    // lấy version từ gplay
+    validGplay.forEach(r => {
+      if (r.version) allVersions.push(r.version);
+    });
+
+    // thêm version từ batch
+    allVersions.push(...batchVersions);
+
+    if (allVersions.length === 0) {
+      return res.status(500).json({ error: 'Không lấy được version' });
     }
 
-    // ----------- CHỌN BEST TỪ GPLAY -----------
-    let bestApp = validResults[0] || { version: "0.0.0" };
+    // ----------- CHỌN VERSION CAO NHẤT -----------
+    let bestVersion = allVersions[0];
 
-    for (let i = 1; i < validResults.length; i++) {
-      if (isVersionNewer(bestApp.version, validResults[i].version)) {
-        bestApp = validResults[i];
+    for (let i = 1; i < allVersions.length; i++) {
+      if (isVersionNewer(bestVersion, allVersions[i])) {
+        bestVersion = allVersions[i];
       }
     }
 
-    // ----------- SO VỚI HTML -----------
-    for (const htmlVer of validHTMLVersions) {
-      if (isVersionNewer(bestApp.version, htmlVer)) {
-        bestApp.version = htmlVer;
-      }
-    }
+    // lấy base app info từ gplay (nếu có)
+    let bestApp = validGplay[0] || {};
+    bestApp.version = bestVersion;
 
     return res.status(200).json({
       ...bestApp,
       debug: {
-        gplayVersions: validResults.map(r => r.version),
-        htmlVersions: validHTMLVersions
+        gplayVersions: validGplay.map(r => r.version),
+        batchVersions: batchVersions,
+        allVersions: allVersions,
+        selected: bestVersion
       }
     });
 
