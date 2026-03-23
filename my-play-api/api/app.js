@@ -1,39 +1,34 @@
 import gplay from 'google-play-scraper';
 
-function isVersionNewer(oldVer, newVer) {
-  if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
-  const cleanOld = String(oldVer).replace(/[^0-9.]/g, '');
-  const cleanNew = String(newVer).replace(/[^0-9.]/g, '');
-  const oldParts = cleanOld.split(".").map(n => parseInt(n, 10) || 0);
-  const newParts = cleanNew.split(".").map(n => parseInt(n, 10) || 0);
-  const len = Math.max(oldParts.length, newParts.length);
-  for (let i = 0; i < len; i++) {
-    if ((newParts[i] || 0) > (oldParts[i] || 0)) return true;
-    if ((newParts[i] || 0) < (oldParts[i] || 0)) return false;
-  }
-  return false;
-}
-
-// HÀM CHỐT HẠ: Dùng ScraperAnt để lấy HTML sạch từ APKCombo
-async function getVersionFromAPKCombo(appId) {
+// 1. Hàm săn version từ APKCombo qua ScrapingAnt (Vượt Cloudflare 100%)
+async function getVersionFromScraperAnt(appId) {
+  // Key bạn cung cấp trong code C#
   const ANT_API_KEY = 'd6efaa10e6114cac96bc12a2e9b21e99'; 
-  const targetUrl = encodeURIComponent(`https://apkcombo.com/vi/a/${appId}/`);
+  const targetUrl = `https://apkcombo.com/vi/a/${appId}/`;
   
-  // Gọi qua Proxy của ScraperAnt để né Cloudflare
-  const proxyUrl = `https://api.scraperant.com/v2/general?url=${targetUrl}&x-api-key=${ANT_API_KEY}&browser=false`;
+  // Gọi qua API ScrapingAnt
+  const proxyUrl = `https://api.scraperant.com/v2/general?url=${encodeURIComponent(targetUrl)}&x-api-key=${ANT_API_KEY}&browser=true`;
 
   try {
     const res = await fetch(proxyUrl);
     if (!res.ok) return null;
-    const data = await res.json();
-    const html = data.content; // ScraperAnt trả về HTML đã vượt qua Cloudflare
 
+    // QUAN TRỌNG: ScrapingAnt trả về JSON
+    const jsonResponse = await res.json();
+    
+    // Lấy nội dung HTML nằm trong trường "content"
+    const html = jsonResponse.content; 
+
+    if (!html) return null;
+
+    // Tìm version trong HTML
     const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
                || html.match(/data-version="([^"]+)"/i)
                || html.match(/Version\s*([\d\.]+)/i);
 
     return match ? match[1].trim().replace(/^v/i, '').trim() : null;
   } catch (e) {
+    console.error("Lỗi ScrapingAnt:", e.message);
     return null;
   }
 }
@@ -45,22 +40,21 @@ export default async function handler(req, res) {
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
   try {
+    // Lấy thông tin từ Google Play trước
     const playApp = await gplay.app({ appId: id, lang: 'vi', country: 'us' }).catch(() => null);
-    if (!playApp) return res.status(404).json({ error: 'App không tồn tại' });
+    
+    // Gọi "Sát thủ" vượt rào Cloudflare dùng ScrapingAnt
+    const apkComboVer = await getVersionFromScraperAnt(id);
 
-    // Gọi "Sát thủ" vượt rào Cloudflare
-    const apkComboVer = await getVersionFromAPKCombo(id);
-
-    let bestVer = playApp.version;
-    let source = "Google Play Gốc";
-
-    if (apkComboVer && isVersionNewer(bestVer, apkComboVer)) {
-      bestVer = apkComboVer;
-      source = "APKCombo (Vượt rào thành công)";
+    if (!playApp) {
+      return res.status(404).json({ error: 'App không tồn tại trên Play Store' });
     }
 
-    playApp.version = bestVer;
-    playApp.recentChanges = (playApp.recentChanges || "") + `\n\n[🛡️ Check Version: ${source}]`;
+    // So sánh và cập nhật version
+    if (apkComboVer && playApp.version !== apkComboVer) {
+      playApp.version = apkComboVer;
+      playApp.recentChanges = (playApp.recentChanges || "") + `\n\n[🛡️ Nguồn: APKCombo via ScrapingAnt]`;
+    }
 
     res.status(200).json(playApp);
   } catch (error) {
