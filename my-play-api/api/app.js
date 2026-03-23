@@ -1,5 +1,6 @@
 import gplay from 'google-play-scraper';
 
+// Hàm so sánh version chuẩn
 function isVersionNewer(oldVer, newVer) {
   if (!oldVer || !newVer || oldVer === "N/A" || newVer === "N/A") return false;
   const cleanOld = String(oldVer).replace(/[^0-9.]/g, '');
@@ -14,44 +15,35 @@ function isVersionNewer(oldVer, newVer) {
   return false;
 }
 
-// TUYỆT CHIÊU GIẢ DANH GOOGLEBOT (Để CF mở cửa mời vào)
-const GOOGLEBOT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-  'X-Forwarded-For': '66.249.66.1', // Ép IP giả của máy chủ Google Search
-  'Accept': '*/*'
-};
-
-// 1. Bot săn từ APKCombo
-async function getApkComboVersion(appId) {
-  try {
-    const res = await fetch(`https://apkcombo.com/vi/a/${appId}/`, { headers: GOOGLEBOT_HEADERS });
-    if (!res.ok) return null;
-    const html = await res.text();
-    if (html.includes('Cloudflare') || html.includes('Just a moment')) return null;
-
-    const match = html.match(/<span class="is-version[^>]*>([^<]+)<\/span>/i)
-               || html.match(/data-version="([^"]+)"/i)
-               || html.match(/Version\s*([\d\.]+)/i);
-    if (match && match[1]) return match[1].trim().replace(/^v/i, '').trim();
-    return null;
-  } catch (e) { return null; }
-}
-
-// 2. Bot săn từ AppBrain (Trang này ít bị chặn hơn)
+// Hàm chuyên đi cào AppBrain (Kèm Header giả danh Googlebot)
 async function getAppBrainVersion(appId) {
   try {
-    const res = await fetch(`https://www.appbrain.com/app/${appId}`, { headers: GOOGLEBOT_HEADERS });
-    if (!res.ok) return null;
+    const url = `https://www.appbrain.com/app/${appId}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'X-Forwarded-For': '66.249.66.1', // Ép IP giả của máy chủ Google
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
+    
+    if (!res.ok) return { version: null, error: `AppBrain báo lỗi HTTP ${res.status}` };
     const html = await res.text();
     
-    // Tìm cấu trúc chứa version của AppBrain
-    const match = html.match(/Changelog cho bản cập nhật ([^<]+)/i)
-               || html.match(/Version:<\/b>\s*([^<]+)/i)
-               || html.match(/Phiên bản hiện tại:<\/b>\s*([^<]+)/i);
-               
-    if (match && match[1]) return match[1].trim().replace(/^v/i, '').trim();
-    return null;
-  } catch (e) { return null; }
+    if (html.includes('Cloudflare') || html.includes('Just a moment')) {
+      return { version: null, error: 'AppBrain cũng đã bật Cloudflare chặn Vercel' };
+    }
+
+    // Lưới Regex siêu việt: Quét mọi định dạng chứa số Version trên AppBrain
+    const match = html.match(/(?:Version|Phiên bản):?(?:<\/td>|<\/th>|<\/b>|<span[^>]*>)?\s*(?:<td[^>]*>|<div[^>]*>)?\s*([0-9]+(?:\.[0-9]+)+)/i);
+    
+    if (match && match[1]) {
+      return { version: match[1].trim(), error: null };
+    }
+    return { version: null, error: 'Không tìm thấy số version trong HTML của AppBrain' };
+  } catch (e) {
+    return { version: null, error: e.message };
+  }
 }
 
 export default async function handler(req, res) {
@@ -61,40 +53,55 @@ export default async function handler(req, res) {
   const { id } = req.query;
   if (!id) return res.status(400).json({ error: 'Thiếu app id' });
 
+  // Khởi tạo Nhật ký theo dõi
+  let debugLog = {
+    app_id: id,
+    gplay_scraper: { version: null, status: "Đang chờ" },
+    appbrain: { version: null, status: "Đang chờ", error: null },
+    ket_luan: ""
+  };
+
   try {
-    // Chạy 3 xe cào cùng lúc: Google Play (lấy ảnh/info) + 2 trang APK (Săn Version)
-    const [playApp, apkComboVer, appBrainVer] = await Promise.all([
-      gplay.app({
+    // Gọi Google Play trước để lấy thông tin nền (Tên, Ảnh...)
+    let playApp = null;
+    try {
+      playApp = await gplay.app({
         appId: id, lang: 'vi', country: 'us',
         requestOptions: { headers: { 'Cache-Control': 'no-cache' } }
-      }).catch(() => null),
-      getApkComboVersion(id),
-      getAppBrainVersion(id)
-    ]);
+      });
+      debugLog.gplay_scraper.status = "Thành công";
+      debugLog.gplay_scraper.version = playApp.version;
+    } catch (e) {
+      debugLog.gplay_scraper.status = "Lỗi thư viện gplay: " + e.message;
+    }
 
     if (!playApp) {
-      return res.status(500).json({ error: 'App ID không tồn tại hoặc lỗi API nền' });
+      return res.status(200).json({ error: "Không lấy được data Google Play", debug_log: debugLog });
     }
 
-    // Gộp 2 kết quả săn được lại, lấy số to nhất làm chuẩn
-    let bestExternalVer = null;
-    let externalSource = "";
-
-    if (apkComboVer) { bestExternalVer = apkComboVer; externalSource = `APKCombo`; }
+    // Song song gọi AppBrain để lấy bản 1%
+    const appBrainResult = await getAppBrainVersion(id);
     
-    if (appBrainVer && isVersionNewer(bestExternalVer, appBrainVer)) {
-      bestExternalVer = appBrainVer; 
-      externalSource = `AppBrain`;
+    if (appBrainResult.error) {
+      debugLog.appbrain.status = "Thất bại";
+      debugLog.appbrain.error = appBrainResult.error;
+    } else {
+      debugLog.appbrain.status = "Thành công";
+      debugLog.appbrain.version = appBrainResult.version;
     }
 
-    // So tài với bản của Google Play đang có
-    if (bestExternalVer && isVersionNewer(playApp.version, bestExternalVer)) {
-      playApp.version = bestExternalVer;
-      playApp.sourceLog = `${externalSource} (Bản mới: ${bestExternalVer})`;
+    // So sánh và Quyết định cướp ngôi
+    if (appBrainResult.version && isVersionNewer(playApp.version, appBrainResult.version)) {
+      playApp.version = appBrainResult.version;
+      playApp.sourceLog = `AppBrain (${appBrainResult.version})`;
+      debugLog.ket_luan = `AppBrain THẮNG: Lấy bản ${appBrainResult.version} đè lên bản ${debugLog.gplay_scraper.version} của Google.`;
     } else {
       playApp.sourceLog = `Google Play`;
+      debugLog.ket_luan = `Giữ Google Play vì AppBrain không lấy được hoặc bản bằng/nhỏ hơn.`;
     }
 
+    // Nhét log vào data để bạn xem
+    playApp.debug_log = debugLog;
     res.status(200).json(playApp);
 
   } catch (error) {
